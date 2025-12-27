@@ -29,6 +29,13 @@ return r;}catch(e){return null;}})()"""
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://music.163.com/"}
 
+# 找呀找呀找端口，找到一个好端口
+def find_free_port():
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
 
 def find_netease():
     # 常见路径
@@ -83,14 +90,16 @@ def find_netease():
 
 
 # 开调试
-def launch_netease(port=9222, path=None):
+def launch_netease(port=None, path=None):
     exe = path if path and os.path.exists(path) else find_netease()
-    if not exe: return False, "未找到网易云"
+    if not exe: return False, "未找到网易云", None
+    if port is None:
+        port = find_free_port()
     try:
         subprocess.Popen([exe, f"--remote-debugging-port={port}"],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
-        return True, exe
-    except Exception as e: return False, str(e)
+        return True, exe, port
+    except Exception as e: return False, str(e), None
 
 
 class Sync:
@@ -303,8 +312,12 @@ class App:
         if p: self.cfg["ncm_path"] = p; self.path.set(p); self.save_cfg()
     
     def do_launch(self):
-        ok, r = launch_netease(9222, self.cfg.get("ncm_path"))
-        if ok: self.status.set("已启动"); self.path.set(r); self.root.after(3000, lambda: self.status.set("就绪"))
+        ok, r, port = launch_netease(None, self.cfg.get("ncm_path"))
+        if ok:
+            self.cfg["ncm_port"] = port
+            self.status.set(f"已启动 (端口:{port})")
+            self.path.set(r)
+            self.root.after(3000, lambda: self.status.set("就绪"))
         else: messagebox.showwarning("提示", f"{r}\n请手动选择路径")
     
     def preview(self):
