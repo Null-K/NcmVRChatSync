@@ -11,22 +11,40 @@ DEFAULT_CONFIG = {
     "template": "🎵 {song} - {artist}\n{bar} {time}\n{lyric1}\n{lyric2}",
 }
 
-# 获取播放状态，检测高亮行（白色 + 22px
-JS_GET_STATE = """(()=>{try{let r={song:'',artist:'',cur:0,dur:0,play:false,lyric1:'',lyric2:''};
-let t=document.querySelector('.main-title');if(t)r.song=t.innerText||'';
-let a=document.querySelector('.author');if(a)r.artist=a.innerText||'';
-let m=document.querySelector('.curtime-thumb');if(m){
-let x=(m.innerText||'').match(/(\\d+):(\\d+)\\s*\\/\\s*(\\d+):(\\d+)/);
-if(x){r.cur=+x[1]*60+ +x[2];r.dur=+x[3]*60+ +x[4];}}
-r.play=!!document.querySelector('[class*="cmd-icon-pause"]');
-let ul=document.querySelector('ul.lyric');
-if(ul&&ul.getBoundingClientRect().height>0){let items=ul.querySelectorAll('li');
-let idx=-1;items.forEach((li,i)=>{let s=window.getComputedStyle(li);
-if(s.color==='rgb(255, 255, 255)'&&s.fontSize==='22px')idx=i;});
-if(idx>=0){r.lyric1=items[idx].innerText?.trim()||'';
-for(let j=idx+1;j<items.length;j++){let t=items[j].innerText?.trim();if(t){r.lyric2=t;break;}}}}
-return r;}catch(e){return null;}})()"""
+# 兼容 VIP 界面
+# 我真没辙了，怎么网易云 VIP 界面还不一样
+JS_GET_STATE = """(()=>{try{
+let r={song:'',artist:'',cur:0,dur:0,play:false,lyric1:'',lyric2:''};
 
+// .main-title, .two-line .title
+let title=document.querySelector('.main-title');
+r.song=title?.innerText?.trim()||'';
+if(!r.song){title=document.querySelector('.two-line .title')||document.querySelector('.two-line');r.song=title?.innerText?.trim()||'';}
+
+// .author, .info.artist
+let artist=document.querySelector('.author');
+r.artist=artist?.innerText?.trim()||'';
+if(!r.artist){artist=document.querySelector('.info.artist');r.artist=(artist?.innerText||'').replace(/^歌手[：:]/,'').trim();}
+
+// .curtime-thumb, miniBarTimeTextStyle
+let timeEl=document.querySelector('.curtime-thumb');
+if(timeEl?.innerText){let m=timeEl.innerText.match(/(\\d+):(\\d+)\\s*\\/\\s*(\\d+):(\\d+)/);if(m){r.cur=+m[1]*60+ +m[2];r.dur=+m[3]*60+ +m[4];}}
+if(!r.dur){let times=[...document.querySelectorAll('[class*="miniBarTimeTextStyle"]')].map(e=>e.innerText||e.innerHTML||'').filter(t=>/\\d+:\\d+/.test(t));
+if(times.length>=2){let p=t=>{let m=t.match(/(\\d+):(\\d+)/);return m?+m[1]*60+ +m[2]:0;};r.cur=p(times[0]);r.dur=p(times[1]);}}
+
+// cmd-icon-pause, title
+r.play=!!document.querySelector('[class*="cmd-icon-pause"]')||!!document.querySelector('[title*="暂停（Ctrl"]');
+
+// .line.current, ul.lyric li
+let curLine=document.querySelector('.line.current');
+if(curLine){r.lyric1=curLine.innerText?.trim()||'';let next=curLine.nextElementSibling;
+while(next){if(next.classList?.contains('line')&&next.innerText?.trim()){r.lyric2=next.innerText.trim();break;}next=next.nextElementSibling;}}
+if(!r.lyric1){let ul=document.querySelector('ul.lyric');
+if(ul&&ul.getBoundingClientRect().height>0){let items=ul.querySelectorAll('li');let idx=-1;
+items.forEach((li,i)=>{let s=window.getComputedStyle(li);if(s.color==='rgb(255, 255, 255)'&&s.fontSize==='22px')idx=i;});
+if(idx>=0){r.lyric1=items[idx].innerText?.trim()||'';for(let j=idx+1;j<items.length;j++){let t=items[j].innerText?.trim();if(t){r.lyric2=t;break;}}}}}
+
+return r;}catch(e){return null;}})()"""
 HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://music.163.com/"}
 
 # 找呀找呀找端口，找到一个好端口
