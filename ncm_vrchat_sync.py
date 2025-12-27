@@ -7,7 +7,7 @@ import requests
 CONFIG_FILE = "ncm_vrchat_config.json"
 DEFAULT_CONFIG = {
     "osc_ip": "127.0.0.1", "osc_port": 9000, "ncm_port": 9222, "ncm_path": "",
-    "refresh_interval": 3.0, "bar_width": 10, "bar_filled": "▪", "bar_empty": "▫", "bar_thumb": "◘",
+    "refresh_interval": 3.0, "bar_width": 9, "bar_filled": "▓", "bar_empty": "░", "bar_thumb": "◘",
     "template": "🎵 {song} - {artist}\n{bar} {time}\n{lyric1}\n{lyric2}",
 }
 
@@ -312,7 +312,7 @@ class App:
             w = int(self.e_bw.get() or 10)
             thumb = self.e_bt.get() or ""
             pos = w // 2
-            bar = (self.e_bf.get() or "▪") * pos + thumb + (self.e_be.get() or "▫") * (w - pos)
+            bar = (self.e_bf.get() or "▓") * pos + thumb + (self.e_be.get() or "░") * (w - pos)
             txt = self.t_tpl.get("1.0","end").strip().format(song="歌曲名称", artist="歌手", bar=bar, time="1:14/5:14", lyric1="当前歌词", lyric2="下句歌词")
             self.t_preview.config(state="normal"); self.t_preview.delete("1.0","end"); self.t_preview.insert("1.0",txt); self.t_preview.config(state="disabled")
         except: pass
@@ -320,8 +320,8 @@ class App:
     def get_cfg(self):
         return {**self.cfg, "osc_ip": self.e_ip.get(), "osc_port": int(self.e_port.get() or 9000),
                 "refresh_interval": max(2, min(10, self.v_interval.get())), "template": self.t_tpl.get("1.0","end").strip(),
-                "bar_width": int(self.e_bw.get() or 10), "bar_filled": self.e_bf.get() or "▪", 
-                "bar_thumb": self.e_bt.get() or "", "bar_empty": self.e_be.get() or "▫"}
+                "bar_width": int(self.e_bw.get() or 9), "bar_filled": self.e_bf.get() or "▓", 
+                "bar_thumb": self.e_bt.get() or "", "bar_empty": self.e_be.get() or "░"}
     
     def cb_status(self, t): self.root.after(0, lambda: self.status.set(t))
     def cb_song(self, t): self.root.after(0, lambda: self.song.set(t[:28]))
