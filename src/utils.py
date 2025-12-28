@@ -21,7 +21,7 @@ def get_lyric(lyrics, pos):
         else:
             r = m - 1
     if idx < 0:
-        return "", ""
+        return lyrics[0][1], lyrics[1][1] if len(lyrics) > 1 else ""
     return lyrics[idx][1], lyrics[idx + 1][1] if idx + 1 < len(lyrics) else ""
 
 
