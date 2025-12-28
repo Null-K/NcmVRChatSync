@@ -1,18 +1,23 @@
 import asyncio
+import contextlib
+import glob
 import json
 import os
 import re
+import socket
 import subprocess
 import threading
 import time
 import tkinter as tk
 import winreg
 from tkinter import filedialog, messagebox, ttk
+from typing import Protocol
 
 import requests
 import websockets
 from pydantic import BaseModel
 from pythonosc import udp_client
+from websockets import protocol
 
 CONFIG_FILE = "ncm_vrchat_config.json"
 
@@ -80,14 +85,12 @@ HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://music.163.com/"}
 
 # 找呀找呀找端口，找到一个好端口
 def find_free_port():
-    import socket
-
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-def find_netease():
+def find_netease() -> str | None:
     # 常见路径
     paths = [
         r"C:\Program Files (x86)\Netease\CloudMusic\cloudmusic.exe",
@@ -119,52 +122,38 @@ def find_netease():
         (winreg.HKEY_CLASSES_ROOT, r"Applications\cloudmusic.exe\shell\open\command"),
     ]
     for root, key in reg_paths:
-        try:
+        with contextlib.suppress(Exception):
             k = winreg.OpenKey(root, key)
-            try:
+            with contextlib.suppress(Exception):
                 loc = winreg.QueryValueEx(k, "InstallLocation")[0]
                 exe = os.path.join(loc, "cloudmusic.exe")
                 if os.path.exists(exe):
                     winreg.CloseKey(k)
                     return exe
-            except:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 cmd = winreg.QueryValueEx(k, "")[0]
                 m = re.search(r'"([^"]+cloudmusic\.exe)"', cmd, re.IGNORECASE)
                 if m and os.path.exists(m.group(1)):
                     winreg.CloseKey(k)
                     return m.group(1)
-            except:
-                pass
             winreg.CloseKey(k)
-        except:
-            pass
-
     # 开始菜单快捷方式
-    try:
-        import glob
-
+    with contextlib.suppress(Exception):
         for pattern in [
             r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\**\*网易云*.lnk",
             r"%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs\**\*网易云*.lnk",
         ]:
             for lnk in glob.glob(os.path.expandvars(pattern), recursive=True):
-                try:
+                with contextlib.suppress(Exception):
                     with open(lnk, "rb") as f:
-                        m = re.search(
+                        if m := re.search(
                             rb"([A-Za-z]:\\[^\x00]+?cloudmusic\.exe)",
                             f.read(),
                             re.IGNORECASE,
-                        )
-                        if m:
+                        ):
                             p = m.group(1).decode("utf-8", errors="ignore")
                             if os.path.exists(p):
                                 return p
-                except:
-                    pass
-    except:
-        pass
     return None
 
 
@@ -175,41 +164,35 @@ def launch_netease(port=None, path=None):
         return False, "未找到网易云", None
     if port is None:
         port = find_free_port()
-    try:
-        subprocess.Popen(
-            [exe, f"--remote-debugging-port={port}"],
-            creationflags=subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
-        return True, exe, port
-    except Exception as e:
-        return False, str(e), None
+    subprocess.Popen(
+        [exe, f"--remote-debugging-port={port}"],
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+    return True, exe, port
+
+
+class CallbackProtocol(Protocol):
+    def cb_status(self, t: str) -> None: ...
+    def cb_song(self, t: str) -> None: ...
+    def cb_output(self, t: str) -> None: ...
 
 
 class Sync:
-    def __init__(self, cfg, cb):
-        self.cfg, self.cb = cfg, cb
-        self.ws = self.osc = None
+    def __init__(self, cfg: Config, cb: CallbackProtocol):
+        self.cfg = cfg
+        self.cb = cb
+        self.ws = None
+        self.osc = None
         self.msg_id = self.last_osc = 0
-        self.running = False
         self.song_key, self.lyrics = "", []
 
     async def connect(self):
-        try:
-            if self.ws:
-                await self.ws.close()
-        except:
-            pass
-        try:
-            pages = requests.get(
-                f"http://127.0.0.1:{self.cfg.ncm_port}/json", timeout=2
-            ).json()
-            self.ws = await websockets.connect(
-                pages[0]["webSocketDebuggerUrl"], ping_interval=30, ping_timeout=15
-            )
-            return True
-        except:
-            return False
+        pages = requests.get(
+            f"http://127.0.0.1:{self.cfg.ncm_port}/json", timeout=2
+        ).json()
+        self.ws = await websockets.connect(
+            pages[0]["webSocketDebuggerUrl"], ping_interval=30, ping_timeout=15
+        )
 
     async def eval_js(self, code):
         if not self.ws:
@@ -230,7 +213,7 @@ class Sync:
                 return d.get("result", {}).get("result", {}).get("value")
 
     def fetch_lyrics(self, song, artist):
-        try:
+        with contextlib.suppress(Exception):
             r = requests.post(
                 "https://music.163.com/api/search/get",
                 data={"s": f"{song} {artist}", "type": 1, "limit": 1},
@@ -262,18 +245,16 @@ class Sync:
                     ],
                     key=lambda x: x[0],
                 )
-        except:
-            pass
         return []
 
     def get_lyric(self, pos):
         if not self.lyrics:
             return "", ""
-        l, r, idx = 0, len(self.lyrics) - 1, -1
-        while l <= r:
-            m = (l + r) // 2
+        left, r, idx = 0, len(self.lyrics) - 1, -1
+        while left <= r:
+            m = (left + r) // 2
             if self.lyrics[m][0] <= pos:
-                idx, l = m, m + 1
+                idx, left = m, m + 1
             else:
                 r = m - 1
         if idx < 0:
@@ -306,66 +287,56 @@ class Sync:
                 lyric1=l1,
                 lyric2=l2,
             )
-        except:
+        except Exception:
             return f"🎵 {s['song']} - {s['artist']}\n{bar}\n{l1}"
 
     def send_osc(self, text):
         if time.time() - self.last_osc < self.cfg.refresh_interval:
             return False
-        try:
-            if not self.osc:
-                self.osc = udp_client.SimpleUDPClient(
-                    self.cfg.osc_ip, self.cfg.osc_port
-                )
-            self.osc.send_message("/chatbox/input", [text, True, False])
-            self.last_osc = time.time()
-            return True
-        except:
-            return False
+        if not self.osc:
+            self.osc = udp_client.SimpleUDPClient(self.cfg.osc_ip, self.cfg.osc_port)
+        self.osc.send_message("/chatbox/input", [text, True, False])
+        self.last_osc = time.time()
+        return True
 
     async def run(self, stop_event: threading.Event):
-        self.running = True
-        self.cb["status"]("连接中...")
+        self.cb.cb_status("连接中...")
 
         for i in range(3):
             if await self.connect():
                 break
-            self.cb["status"](f"重试 {i + 1}/3")
+            self.cb.cb_status(f"重试 {i + 1}/3")
             await asyncio.sleep(2)
         if not self.ws:
-            self.cb["status"]("连接失败")
-            self.running = False
+            self.cb.cb_status("连接失败")
             return
-        self.cb["status"]("已连接")
+        self.cb.cb_status("已连接")
 
         while not stop_event.is_set():
             try:
                 s = await self.eval_js(JS_GET_STATE)
                 if s and s.get("song"):
                     if s["play"]:
-                        self.cb["song"](f"播放：{s['song']} - {s['artist']}")
+                        self.cb.cb_song(f"播放：{s['song']} - {s['artist']}")
                         key = f"{s['song']}-{s['artist']}"
                         if key != self.song_key:
                             self.song_key = key
                             self.lyrics = self.fetch_lyrics(s["song"], s["artist"])
                         out = self.format(s)
                         if self.send_osc(out):
-                            self.cb["output"](out)
+                            self.cb.cb_output(out)
                     else:
-                        self.cb["song"](f"暂停：{s['song']}")
+                        self.cb.cb_song(f"暂停：{s['song']}")
                 await asyncio.sleep(0.3)
             except websockets.exceptions.ConnectionClosed:
                 await asyncio.sleep(1)
-                if self.running and await self.connect():
-                    self.cb["status"]("已重连")
-            except:
+                if await self.connect():
+                    self.cb.cb_status("已重连")
+            except Exception:
                 await asyncio.sleep(0.5)
 
-        if self.ws:
-            try:
-                await self.ws.close()
-            except:
-                pass
+        if self.ws.state == protocol.State.OPEN:
+            await self.ws.close()
 
 
 class App:
@@ -387,9 +358,9 @@ class App:
                     **json.load(f),
                 }
             data = Config(**data)
-        except Exception:
+        except Exception:  # 默认配置覆盖
             data = Config()
-        self.update_cfg()
+        self.save_cfg()
         return data
 
     def save_cfg(self):
@@ -504,11 +475,10 @@ class App:
         self.preview()
 
     def do_browse(self):
-        p = filedialog.askopenfilename(
+        if p := filedialog.askopenfilename(
             title="选择 cloudmusic.exe",
             filetypes=[("", "cloudmusic.exe"), ("", "*.exe")],
-        )
-        if p:
+        ):
             self.cfg.ncm_path = p
             self.path.set(p)
             self.save_cfg()
@@ -524,33 +494,30 @@ class App:
             messagebox.showwarning("提示", f"{r}\n请手动选择路径")
 
     def preview(self):
-        try:
-            w = int(self.e_bw.get() or 10)
-            thumb = self.e_bt.get() or ""
-            pos = w // 2
-            bar = (
-                (self.e_bf.get() or "▓") * pos
-                + thumb
-                + (self.e_be.get() or "░") * (w - pos)
+        w = int(self.e_bw.get() or 10)
+        thumb = self.e_bt.get() or ""
+        pos = w // 2
+        bar = (
+            (self.e_bf.get() or "▓") * pos
+            + thumb
+            + (self.e_be.get() or "░") * (w - pos)
+        )
+        txt = (
+            self.t_tpl.get("1.0", "end")
+            .strip()
+            .format(
+                song="歌曲名称",
+                artist="歌手",
+                bar=bar,
+                time="1:14/5:14",
+                lyric1="当前歌词",
+                lyric2="下句歌词",
             )
-            txt = (
-                self.t_tpl.get("1.0", "end")
-                .strip()
-                .format(
-                    song="歌曲名称",
-                    artist="歌手",
-                    bar=bar,
-                    time="1:14/5:14",
-                    lyric1="当前歌词",
-                    lyric2="下句歌词",
-                )
-            )
-            self.t_preview.config(state="normal")
-            self.t_preview.delete("1.0", "end")
-            self.t_preview.insert("1.0", txt)
-            self.t_preview.config(state="disabled")
-        except:
-            pass
+        )
+        self.t_preview.config(state="normal")
+        self.t_preview.delete("1.0", "end")
+        self.t_preview.insert("1.0", txt)
+        self.t_preview.config(state="disabled")
 
     def update_cfg(self):
         self.cfg.osc_ip = self.e_ip.get()
@@ -562,13 +529,13 @@ class App:
         self.cfg.bar_thumb = self.e_bt.get() or ""
         self.cfg.bar_empty = self.e_be.get() or "░"
 
-    def cb_status(self, t):
+    def cb_status(self, t: str):
         self.root.after(0, lambda: self.status.set(t))
 
-    def cb_song(self, t):
+    def cb_song(self, t: str):
         self.root.after(0, lambda: self.song.set(t[:28]))
 
-    def cb_output(self, t):
+    def cb_output(self, t: str):
         def f():
             self.t_preview.config(state="normal")
             self.t_preview.delete("1.0", "end")
@@ -579,6 +546,7 @@ class App:
 
     def do_start(self):
         try:
+            self.update_cfg()
             self.save_cfg()
         except Exception as e:
             messagebox.showerror("错误", str(e))
@@ -587,11 +555,7 @@ class App:
             target=lambda: asyncio.run(
                 Sync(
                     self.cfg,
-                    {
-                        "status": self.cb_status,
-                        "song": self.cb_song,
-                        "output": self.cb_output,
-                    },
+                    self,
                 ).run(self.sync_event)
             ),
             daemon=True,
