@@ -11,56 +11,70 @@ from tkinter import filedialog, messagebox, ttk
 
 import requests
 import websockets
+from pydantic import BaseModel
 from pythonosc import udp_client
 
 CONFIG_FILE = "ncm_vrchat_config.json"
-DEFAULT_CONFIG = {
-    "osc_ip": "127.0.0.1",
-    "osc_port": 9000,
-    "ncm_port": 9222,
-    "ncm_path": "",
-    "refresh_interval": 3.0,
-    "bar_width": 9,
-    "bar_filled": "▓",
-    "bar_empty": "░",
-    "bar_thumb": "◘",
-    "template": "🎵 {song} - {artist}\n{bar} {time}\n{lyric1}\n{lyric2}",
-}
+
+
+class Config(BaseModel):
+    osc_ip: str = "127.0.0.1"
+    osc_port: int = 9000
+    ncm_port: int = 9222
+    ncm_path: str = ""
+    refresh_interval: float = 3.0
+    bar_width: int = 9
+    bar_filled: str = "▓"
+    bar_empty: str = "░"
+    bar_thumb: str = "◘"
+    template: str = "🎵 {song} - {artist}\n{bar} {time}\n{lyric1}\n{lyric2}"
+
 
 # 兼容 VIP 界面
 # 我真没辙了，怎么网易云 VIP 界面还不一样
-JS_GET_STATE = """(()=>{try{
-let r={song:'',artist:'',cur:0,dur:0,play:false,lyric1:'',lyric2:''};
+JS_GET_STATE = r"""(() => {
+    try {
+        let r = { song: '', artist: '', cur: 0, dur: 0, play: false, lyric1: '', lyric2: '' };
 
-// .main-title, .two-line .title
-let title=document.querySelector('.main-title');
-r.song=title?.innerText?.trim()||'';
-if(!r.song){title=document.querySelector('.two-line .title')||document.querySelector('.two-line');r.song=title?.innerText?.trim()||'';}
+        // .main-title, .two-line .title
+        let title = document.querySelector('.main-title');
+        r.song = title?.innerText?.trim() || '';
+        if (!r.song) { title = document.querySelector('.two-line .title') || document.querySelector('.two-line'); r.song = title?.innerText?.trim() || ''; }
 
-// .author, .info.artist
-let artist=document.querySelector('.author');
-r.artist=artist?.innerText?.trim()||'';
-if(!r.artist){artist=document.querySelector('.info.artist');r.artist=(artist?.innerText||'').replace(/^歌手 [：:]/,'').trim();}
+        // .author, .info.artist
+        let artist = document.querySelector('.author');
+        r.artist = artist?.innerText?.trim() || '';
+        if (!r.artist) { artist = document.querySelector('.info.artist'); r.artist = (artist?.innerText || '').replace(/^歌手 [：:]/, '').trim(); }
 
-// .curtime-thumb, miniBarTimeTextStyle
-let timeEl=document.querySelector('.curtime-thumb');
-if(timeEl?.innerText){let m=timeEl.innerText.match(/(\\d+):(\\d+)\\s*\\/\\s*(\\d+):(\\d+)/);if(m){r.cur=+m[1]*60+ +m[2];r.dur=+m[3]*60+ +m[4];}}
-if(!r.dur){let times=[...document.querySelectorAll('[class*="miniBarTimeTextStyle"]')].map(e=>e.innerText||e.innerHTML||'').filter(t=>/\\d+:\\d+/.test(t));
-if(times.length>=2){let p=t=>{let m=t.match(/(\\d+):(\\d+)/);return m?+m[1]*60+ +m[2]:0;};r.cur=p(times[0]);r.dur=p(times[1]);}}
+        // .curtime-thumb, miniBarTimeTextStyle
+        let timeEl = document.querySelector('.curtime-thumb');
+        if (timeEl?.innerText) { let m = timeEl.innerText.match(/(\d+):(\d+)\s*\/\s * (\d +):(\d +)/); if (m) { r.cur = +m[1] * 60 + +m[2]; r.dur = +m[3] * 60 + +m[4]; } }
+        if (!r.dur) {
+            let times = [...document.querySelectorAll('[class*="miniBarTimeTextStyle"]')].map(e => e.innerText || e.innerHTML || '').filter(t => /\d+:\d+/.test(t));
+            if (times.length >= 2) { let p = t => { let m = t.match(/(\d+):(\d+)/); return m ? +m[1] * 60 + +m[2] : 0; }; r.cur = p(times[0]); r.dur = p(times[1]); }
+        }
 
-// cmd-icon-pause, title
-r.play=!!document.querySelector('[class*="cmd-icon-pause"]')||!!document.querySelector('[title*="暂停（Ctrl"]');
+        // cmd-icon-pause, title
+        r.play = !!document.querySelector('[class*="cmd-icon-pause"]') || !!document.querySelector('[title*="暂停（Ctrl"]');
 
-// .line.current, ul.lyric li
-let curLine=document.querySelector('.line.current');
-if(curLine){r.lyric1=curLine.innerText?.trim()||'';let next=curLine.nextElementSibling;
-while(next){if(next.classList?.contains('line')&&next.innerText?.trim()){r.lyric2=next.innerText.trim();break;}next=next.nextElementSibling;}}
-if(!r.lyric1){let ul=document.querySelector('ul.lyric');
-if(ul&&ul.getBoundingClientRect().height>0){let items=ul.querySelectorAll('li');let idx=-1;
-items.forEach((li,i)=>{let s=window.getComputedStyle(li);if(s.color==='rgb(255, 255, 255)'&&s.fontSize==='22px')idx=i;});
-if(idx>=0){r.lyric1=items[idx].innerText?.trim()||'';for(let j=idx+1;j<items.length;j++){let t=items[j].innerText?.trim();if(t){r.lyric2=t;break;}}}}}
+        // .line.current, ul.lyric li
+        let curLine = document.querySelector('.line.current');
+        if (curLine) {
+            r.lyric1 = curLine.innerText?.trim() || ''; let next = curLine.nextElementSibling;
+            while (next) { if (next.classList?.contains('line') && next.innerText?.trim()) { r.lyric2 = next.innerText.trim(); break; } next = next.nextElementSibling; }
+        }
+        if (!r.lyric1) {
+            let ul = document.querySelector('ul.lyric');
+            if (ul && ul.getBoundingClientRect().height > 0) {
+                let items = ul.querySelectorAll('li'); let idx = -1;
+                items.forEach((li, i) => { let s = window.getComputedStyle(li); if (s.color === 'rgb(255, 255, 255)' && s.fontSize === '22px') idx = i; });
+                if (idx >= 0) { r.lyric1 = items[idx].innerText?.trim() || ''; for (let j = idx + 1; j < items.length; j++) { let t = items[j].innerText?.trim(); if (t) { r.lyric2 = t; break; } } }
+            }
+        }
 
-return r;}catch(e){return null;}})()"""
+        return r;
+    } catch (e) { return null; }
+})()"""
 HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://music.163.com/"}
 
 
@@ -188,7 +202,7 @@ class Sync:
             pass
         try:
             pages = requests.get(
-                f"http://127.0.0.1:{self.cfg['ncm_port']}/json", timeout=2
+                f"http://127.0.0.1:{self.cfg.ncm_port}/json", timeout=2
             ).json()
             self.ws = await websockets.connect(
                 pages[0]["webSocketDebuggerUrl"], ping_interval=30, ping_timeout=15
@@ -269,26 +283,22 @@ class Sync:
         ) else ""
 
     def format(self, s):
-        c, d, w = s["cur"], s["dur"], self.cfg["bar_width"]
+        c, d, w = s["cur"], s["dur"], self.cfg.bar_width
         pos = int(w * c / d) if d else 0
 
-        # 进度条
-        thumb = self.cfg.get("bar_thumb", "")
+        thumb = self.cfg.bar_thumb
         if thumb:
-            bar = (
-                self.cfg["bar_filled"] * pos + thumb + self.cfg["bar_empty"] * (w - pos)
-            )
+            bar = self.cfg.bar_filled * pos + thumb + self.cfg.bar_empty * (w - pos)
         else:
-            bar = self.cfg["bar_filled"] * pos + self.cfg["bar_empty"] * (w - pos)
+            bar = self.cfg.bar_filled * pos + self.cfg.bar_empty * (w - pos)
 
-        # 获取歌词
         l1, l2 = s.get("lyric1"), s.get("lyric2")
         if not l1 and self.song_key == f"{s['song']}-{s['artist']}":
             l1, l2 = self.get_lyric(c)
         l1, l2 = l1 or "纯音乐，请欣赏", l2 or ""
 
         try:
-            return self.cfg["template"].format(
+            return self.cfg.template.format(
                 song=s["song"],
                 artist=s["artist"],
                 bar=bar,
@@ -300,12 +310,12 @@ class Sync:
             return f"🎵 {s['song']} - {s['artist']}\n{bar}\n{l1}"
 
     def send_osc(self, text):
-        if time.time() - self.last_osc < self.cfg["refresh_interval"]:
+        if time.time() - self.last_osc < self.cfg.refresh_interval:
             return False
         try:
             if not self.osc:
                 self.osc = udp_client.SimpleUDPClient(
-                    self.cfg["osc_ip"], self.cfg["osc_port"]
+                    self.cfg.osc_ip, self.cfg.osc_port
                 )
             self.osc.send_message("/chatbox/input", [text, True, False])
             self.last_osc = time.time()
@@ -313,7 +323,7 @@ class Sync:
         except:
             return False
 
-    async def run(self):
+    async def run(self, stop_event: threading.Event):
         self.running = True
         self.cb["status"]("连接中...")
 
@@ -328,7 +338,7 @@ class Sync:
             return
         self.cb["status"]("已连接")
 
-        while self.running:
+        while not stop_event.is_set():
             try:
                 s = await self.eval_js(JS_GET_STATE)
                 if s and s.get("song"):
@@ -357,9 +367,6 @@ class Sync:
             except:
                 pass
 
-    def stop(self):
-        self.running = False
-
 
 class App:
     def __init__(self):
@@ -367,26 +374,31 @@ class App:
         self.root.title("网易云 VRC 助手")
         self.root.geometry("460x480")
         self.root.resizable(False, False)
-        self.cfg = self.load_cfg()
-        self.sync = None
+        self.cfg: Config = self.load_cfg()
+        self.sync_event = threading.Event()
+        self.sync_task: None | threading.Thread = None
         self.build_ui()
 
-    def load_cfg(self):
+    def load_cfg(self) -> Config:
         try:
-            return {**DEFAULT_CONFIG, **json.load(open(CONFIG_FILE, encoding="utf-8"))}
-        except:
-            return DEFAULT_CONFIG.copy()
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                data = {
+                    **Config().model_dump(),
+                    **json.load(f),
+                }
+            data = Config(**data)
+        except Exception:
+            data = Config()
+        self.update_cfg()
+        return data
 
     def save_cfg(self):
-        try:
-            json.dump(
-                self.cfg,
-                open(CONFIG_FILE, "w", encoding="utf-8"),
-                ensure_ascii=False,
-                indent=2,
-            )
-        except:
-            pass
+        data = self.cfg.model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     def build_ui(self):
         m = ttk.Frame(self.root, padding=12)
@@ -421,7 +433,7 @@ class App:
         f = ttk.Frame(m)
         f.pack(fill="x", pady=(0, 8))
         ttk.Label(f, text="网易云路径：").pack(side="left")
-        self.path = tk.StringVar(value=self.cfg.get("ncm_path") or "(自动检测)")
+        self.path = tk.StringVar(value=self.cfg.ncm_path or "(自动检测)")
         ttk.Label(f, textvariable=self.path, foreground="gray").pack(
             side="left", padx=4
         )
@@ -433,14 +445,14 @@ class App:
         g.pack(fill="x")
         ttk.Label(g, text="OSC").grid(row=0, column=0)
         self.e_ip = ttk.Entry(g, width=11)
-        self.e_ip.insert(0, self.cfg["osc_ip"])
+        self.e_ip.insert(0, self.cfg.osc_ip)
         self.e_ip.grid(row=0, column=1)
         ttk.Label(g, text=":").grid(row=0, column=2)
         self.e_port = ttk.Entry(g, width=5)
-        self.e_port.insert(0, self.cfg["osc_port"])
+        self.e_port.insert(0, str(self.cfg.osc_port))
         self.e_port.grid(row=0, column=3)
         ttk.Label(g, text="刷新").grid(row=0, column=4, padx=(12, 0))
-        self.v_interval = tk.DoubleVar(value=self.cfg["refresh_interval"])
+        self.v_interval = tk.DoubleVar(value=self.cfg.refresh_interval)
         ttk.Spinbox(
             g, from_=2, to=10, increment=0.5, width=4, textvariable=self.v_interval
         ).grid(row=0, column=5)
@@ -452,19 +464,19 @@ class App:
         ttk.Label(g2, text="进度条").pack(side="left")
         ttk.Label(g2, text="宽度").pack(side="left", padx=(8, 0))
         self.e_bw = ttk.Entry(g2, width=3)
-        self.e_bw.insert(0, self.cfg["bar_width"])
+        self.e_bw.insert(0, str(self.cfg.bar_width))
         self.e_bw.pack(side="left", padx=2)
         ttk.Label(g2, text="已播放").pack(side="left", padx=(8, 0))
         self.e_bf = ttk.Entry(g2, width=3)
-        self.e_bf.insert(0, self.cfg["bar_filled"])
+        self.e_bf.insert(0, self.cfg.bar_filled)
         self.e_bf.pack(side="left", padx=2)
         ttk.Label(g2, text="滑块").pack(side="left", padx=(8, 0))
         self.e_bt = ttk.Entry(g2, width=3)
-        self.e_bt.insert(0, self.cfg.get("bar_thumb", "●"))
+        self.e_bt.insert(0, self.cfg.bar_thumb)
         self.e_bt.pack(side="left", padx=2)
         ttk.Label(g2, text="未播放").pack(side="left", padx=(8, 0))
         self.e_be = ttk.Entry(g2, width=3)
-        self.e_be.insert(0, self.cfg["bar_empty"])
+        self.e_be.insert(0, self.cfg.bar_empty)
         self.e_be.pack(side="left", padx=2)
 
         # 输出模板
@@ -476,7 +488,7 @@ class App:
             foreground="gray",
         ).pack(anchor="w")
         self.t_tpl = tk.Text(f, height=3, font=("Consolas", 10))
-        self.t_tpl.insert("1.0", self.cfg["template"])
+        self.t_tpl.insert("1.0", self.cfg.template)
         self.t_tpl.pack(fill="both", expand=True, pady=(4, 0))
 
         # 实时预览
@@ -497,14 +509,14 @@ class App:
             filetypes=[("", "cloudmusic.exe"), ("", "*.exe")],
         )
         if p:
-            self.cfg["ncm_path"] = p
+            self.cfg.ncm_path = p
             self.path.set(p)
             self.save_cfg()
 
     def do_launch(self):
-        ok, r, port = launch_netease(None, self.cfg.get("ncm_path"))
-        if ok:
-            self.cfg["ncm_port"] = port
+        ok, r, port = launch_netease(None, self.cfg.ncm_path)
+        if ok and port is not None:
+            self.cfg.ncm_port = port
             self.status.set(f"已启动 (端口:{port})")
             self.path.set(r)
             self.root.after(3000, lambda: self.status.set("就绪"))
@@ -540,18 +552,15 @@ class App:
         except:
             pass
 
-    def get_cfg(self):
-        return {
-            **self.cfg,
-            "osc_ip": self.e_ip.get(),
-            "osc_port": int(self.e_port.get() or 9000),
-            "refresh_interval": max(2, min(10, self.v_interval.get())),
-            "template": self.t_tpl.get("1.0", "end").strip(),
-            "bar_width": int(self.e_bw.get() or 9),
-            "bar_filled": self.e_bf.get() or "▓",
-            "bar_thumb": self.e_bt.get() or "",
-            "bar_empty": self.e_be.get() or "░",
-        }
+    def update_cfg(self):
+        self.cfg.osc_ip = self.e_ip.get()
+        self.cfg.osc_port = int(self.e_port.get() or 9000)
+        self.cfg.refresh_interval = max(2, min(10, self.v_interval.get()))
+        self.cfg.template = self.t_tpl.get("1.0", "end").strip()
+        self.cfg.bar_width = int(self.e_bw.get() or 9)
+        self.cfg.bar_filled = self.e_bf.get() or "▓"
+        self.cfg.bar_thumb = self.e_bt.get() or ""
+        self.cfg.bar_empty = self.e_be.get() or "░"
 
     def cb_status(self, t):
         self.root.after(0, lambda: self.status.set(t))
@@ -570,25 +579,33 @@ class App:
 
     def do_start(self):
         try:
-            self.cfg = self.get_cfg()
             self.save_cfg()
         except Exception as e:
             messagebox.showerror("错误", str(e))
             return
-        self.sync = Sync(
-            self.cfg,
-            {"status": self.cb_status, "song": self.cb_song, "output": self.cb_output},
+        self.sync_task = threading.Thread(
+            target=lambda: asyncio.run(
+                Sync(
+                    self.cfg,
+                    {
+                        "status": self.cb_status,
+                        "song": self.cb_song,
+                        "output": self.cb_output,
+                    },
+                ).run(self.sync_event)
+            ),
+            daemon=True,
         )
-        threading.Thread(
-            target=lambda: asyncio.run(self.sync.run()), daemon=True
-        ).start()
+        self.sync_task.start()
+
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
         self.btn_launch.config(state="disabled")
 
     def do_stop(self):
-        if self.sync:
-            self.sync.stop()
+        if self.sync_task and self.sync_task.is_alive():
+            self.sync_event.set()
+            self.sync_event = threading.Event()
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
         self.btn_launch.config(state="normal")
