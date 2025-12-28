@@ -42,9 +42,10 @@ JS_GET_STATE = r"""(() => {
         let r = { song: '', artist: '', cur: 0, dur: 0, play: false, lyric1: '', lyric2: '' };
 
         // .main-title, .two-line .title
-        let title = document.querySelector('.main-title');
-        r.song = title?.innerText?.trim() || '';
-        if (!r.song) { title = document.querySelector('.two-line .title') || document.querySelector('.two-line'); r.song = title?.innerText?.trim() || ''; }
+        let title = document.querySelector('.two-line .title');
+        if (title) {
+            r.song = title.getAttribute("title")?.trim() || title.innerText?.trim() || "";
+        }
 
         // .author, .info.artist
         let artist = document.querySelector('.author');
