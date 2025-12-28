@@ -1,38 +1,21 @@
 import asyncio
-import contextlib
-import glob
 import json
-import os
-import re
-import socket
-import subprocess
 import threading
 import time
 import tkinter as tk
-import winreg
 from tkinter import filedialog, messagebox, ttk
 from typing import Protocol
 
 import requests
 import websockets
-from pydantic import BaseModel
 from pythonosc import udp_client
 from websockets import protocol
 
+from src.config import Config
+from src.state import SharedState
+from src.utils import fetch_lyrics, format_output, launch_netease
+
 CONFIG_FILE = "ncm_vrchat_config.json"
-
-
-class Config(BaseModel):
-    osc_ip: str = "127.0.0.1"
-    osc_port: int = 9000
-    ncm_port: int = 9222
-    ncm_path: str = ""
-    refresh_interval: float = 3.0
-    bar_width: int = 9
-    bar_filled: str = "▓"
-    bar_empty: str = "░"
-    bar_thumb: str = "◘"
-    template: str = "🎵 {song} - {artist}\n{bar} {time}\n{lyric1}\n{lyric2}"
 
 
 # 兼容 VIP 界面
@@ -81,95 +64,6 @@ JS_GET_STATE = r"""(() => {
         return r;
     } catch (e) { return null; }
 })()"""
-HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://music.163.com/"}
-
-
-# 找呀找呀找端口，找到一个好端口
-def find_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def find_netease() -> str | None:
-    # 常见路径
-    paths = [
-        r"C:\Program Files (x86)\Netease\CloudMusic\cloudmusic.exe",
-        r"C:\Program Files\Netease\CloudMusic\cloudmusic.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Netease\CloudMusic\cloudmusic.exe"),
-        os.path.expandvars(r"%APPDATA%\Netease\CloudMusic\cloudmusic.exe"),
-        os.path.expandvars(
-            r"%LOCALAPPDATA%\Programs\Netease\CloudMusic\cloudmusic.exe"
-        ),
-    ]
-    for p in paths:
-        if os.path.exists(p):
-            return p
-
-    # 注册表
-    reg_paths = [
-        (
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\网易云音乐",
-        ),
-        (
-            winreg.HKEY_CURRENT_USER,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\网易云音乐",
-        ),
-        (
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\网易云音乐",
-        ),
-        (winreg.HKEY_CLASSES_ROOT, r"Applications\cloudmusic.exe\shell\open\command"),
-    ]
-    for root, key in reg_paths:
-        with contextlib.suppress(Exception):
-            k = winreg.OpenKey(root, key)
-            with contextlib.suppress(Exception):
-                loc = winreg.QueryValueEx(k, "InstallLocation")[0]
-                exe = os.path.join(loc, "cloudmusic.exe")
-                if os.path.exists(exe):
-                    winreg.CloseKey(k)
-                    return exe
-            with contextlib.suppress(Exception):
-                cmd = winreg.QueryValueEx(k, "")[0]
-                m = re.search(r'"([^"]+cloudmusic\.exe)"', cmd, re.IGNORECASE)
-                if m and os.path.exists(m.group(1)):
-                    winreg.CloseKey(k)
-                    return m.group(1)
-            winreg.CloseKey(k)
-    # 开始菜单快捷方式
-    with contextlib.suppress(Exception):
-        for pattern in [
-            r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\**\*网易云*.lnk",
-            r"%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs\**\*网易云*.lnk",
-        ]:
-            for lnk in glob.glob(os.path.expandvars(pattern), recursive=True):
-                with contextlib.suppress(Exception):
-                    with open(lnk, "rb") as f:
-                        if m := re.search(
-                            rb"([A-Za-z]:\\[^\x00]+?cloudmusic\.exe)",
-                            f.read(),
-                            re.IGNORECASE,
-                        ):
-                            p = m.group(1).decode("utf-8", errors="ignore")
-                            if os.path.exists(p):
-                                return p
-    return None
-
-
-# 开调试
-def launch_netease(port=None, path=None):
-    exe = path if path and os.path.exists(path) else find_netease()
-    if not exe:
-        return False, "未找到网易云", None
-    if port is None:
-        port = find_free_port()
-    subprocess.Popen(
-        [exe, f"--remote-debugging-port={port}"],
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
-    return True, exe, port
 
 
 class CallbackProtocol(Protocol):
@@ -178,166 +72,109 @@ class CallbackProtocol(Protocol):
     def cb_output(self, t: str) -> None: ...
 
 
-class Sync:
-    def __init__(self, cfg: Config, cb: CallbackProtocol):
-        self.cfg = cfg
-        self.cb = cb
-        self.ws = None
-        self.osc = None
-        self.msg_id = self.last_osc = 0
-        self.song_key, self.lyrics = "", []
+def netease_thread(
+    cfg: Config, shared: SharedState, stop_event: threading.Event, cb: CallbackProtocol
+):
+    class NeteaseSync:
+        def __init__(self):
+            self.ws = None
+            self.msg_id = 0
 
-    async def connect(self):
-        pages = requests.get(
-            f"http://127.0.0.1:{self.cfg.ncm_port}/json", timeout=2
-        ).json()
-        self.ws = await websockets.connect(
-            pages[0]["webSocketDebuggerUrl"], ping_interval=30, ping_timeout=15
-        )
-
-    async def eval_js(self, code):
-        if not self.ws:
-            return None
-        self.msg_id += 1
-        await self.ws.send(
-            json.dumps(
-                {
-                    "id": self.msg_id,
-                    "method": "Runtime.evaluate",
-                    "params": {"expression": code, "returnByValue": True},
-                }
-            )
-        )
-        async for msg in self.ws:
-            d = json.loads(msg)
-            if d.get("id") == self.msg_id:
-                return d.get("result", {}).get("result", {}).get("value")
-
-    def fetch_lyrics(self, song, artist):
-        with contextlib.suppress(Exception):
-            r = requests.post(
-                "https://music.163.com/api/search/get",
-                data={"s": f"{song} {artist}", "type": 1, "limit": 1},
-                headers=HEADERS,
-                timeout=3,
+        async def connect(self):
+            pages = requests.get(
+                f"http://127.0.0.1:{cfg.ncm_port}/json", timeout=2
             ).json()
-            if r.get("result", {}).get("songs"):
-                lrc = (
-                    requests.get(
-                        f"https://music.163.com/api/song/lyric?id={r['result']['songs'][0]['id']}&lv=1",
-                        headers=HEADERS,
-                        timeout=3,
-                    )
-                    .json()
-                    .get("lrc", {})
-                    .get("lyric", "")
-                )
-                # 解析 LRC
-                return sorted(
-                    [
-                        (
-                            int(m[1]) * 60
-                            + int(m[2])
-                            + float(m[3]) * (0.01 if len(m[3]) == 2 else 0.001),
-                            m[4].strip(),
-                        )
-                        for m in re.finditer(r"\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)", lrc)
-                        if m[4].strip()
-                    ],
-                    key=lambda x: x[0],
-                )
-        return []
-
-    def get_lyric(self, pos):
-        if not self.lyrics:
-            return "", ""
-        left, r, idx = 0, len(self.lyrics) - 1, -1
-        while left <= r:
-            m = (left + r) // 2
-            if self.lyrics[m][0] <= pos:
-                idx, left = m, m + 1
-            else:
-                r = m - 1
-        if idx < 0:
-            return "", ""
-        return self.lyrics[idx][1], self.lyrics[idx + 1][1] if idx + 1 < len(
-            self.lyrics
-        ) else ""
-
-    def format(self, s):
-        c, d, w = s["cur"], s["dur"], self.cfg.bar_width
-        pos = int(w * c / d) if d else 0
-
-        thumb = self.cfg.bar_thumb
-        if thumb:
-            bar = self.cfg.bar_filled * pos + thumb + self.cfg.bar_empty * (w - pos)
-        else:
-            bar = self.cfg.bar_filled * pos + self.cfg.bar_empty * (w - pos)
-
-        l1, l2 = s.get("lyric1"), s.get("lyric2")
-        if not l1 and self.song_key == f"{s['song']}-{s['artist']}":
-            l1, l2 = self.get_lyric(c)
-        l1, l2 = l1 or "纯音乐，请欣赏", l2 or ""
-
-        try:
-            return self.cfg.template.format(
-                song=s["song"],
-                artist=s["artist"],
-                bar=bar,
-                time=f"{c // 60}:{c % 60:02d}/{d // 60}:{d % 60:02d}",
-                lyric1=l1,
-                lyric2=l2,
+            self.ws = await websockets.connect(
+                pages[0]["webSocketDebuggerUrl"], ping_interval=30, ping_timeout=15
             )
-        except Exception:
-            return f"🎵 {s['song']} - {s['artist']}\n{bar}\n{l1}"
+            print("Connected to Netease WebSocket", pages[0]["webSocketDebuggerUrl"])
 
-    def send_osc(self, text):
-        if time.time() - self.last_osc < self.cfg.refresh_interval:
-            return False
-        if not self.osc:
-            self.osc = udp_client.SimpleUDPClient(self.cfg.osc_ip, self.cfg.osc_port)
-        self.osc.send_message("/chatbox/input", [text, True, False])
-        self.last_osc = time.time()
-        return True
+        async def eval_js(self, code):
+            if not self.ws:
+                return None
+            self.msg_id += 1
+            await self.ws.send(
+                json.dumps(
+                    {
+                        "id": self.msg_id,
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": code, "returnByValue": True},
+                    }
+                )
+            )
+            async for msg in self.ws:
+                d = json.loads(msg)
+                if d.get("id") == self.msg_id:
+                    return d.get("result", {}).get("result", {}).get("value")
 
-    async def run(self, stop_event: threading.Event):
-        self.cb.cb_status("连接中...")
-
-        for i in range(3):
-            if await self.connect():
-                break
-            self.cb.cb_status(f"重试 {i + 1}/3")
-            await asyncio.sleep(2)
-        if not self.ws:
-            self.cb.cb_status("连接失败")
+    async def run():
+        cb.cb_status("连接中...")
+        sync = NeteaseSync()
+        retry_count = 0
+        max_retries = 3
+        while not sync.ws and retry_count < max_retries:
+            try:
+                await sync.connect()
+            except Exception as e:
+                retry_count += 1
+                cb.cb_status(f"连接失败，重试中... {retry_count}/{max_retries} \n {e}")
+                await asyncio.sleep(2)
+        if not sync.ws:
+            cb.cb_status("连接失败，已达最大重试次数")
             return
-        self.cb.cb_status("已连接")
-
+        cb.cb_status("已连接")
         while not stop_event.is_set():
             try:
-                s = await self.eval_js(JS_GET_STATE)
+                s = await sync.eval_js(JS_GET_STATE)
                 if s and s.get("song"):
-                    if s["play"]:
-                        self.cb.cb_song(f"播放：{s['song']} - {s['artist']}")
-                        key = f"{s['song']}-{s['artist']}"
-                        if key != self.song_key:
-                            self.song_key = key
-                            self.lyrics = self.fetch_lyrics(s["song"], s["artist"])
-                        out = self.format(s)
-                        if self.send_osc(out):
-                            self.cb.cb_output(out)
-                    else:
-                        self.cb.cb_song(f"暂停：{s['song']}")
+                    with shared.lock:
+                        shared.data.update(s)
+                        key = f"{shared.data.song}-{shared.data.artist}"
+                        if key != shared.song_key:
+                            shared.song_key = key
+                            shared.lyrics = fetch_lyrics(
+                                shared.data.song, shared.data.artist
+                            )
                 await asyncio.sleep(0.3)
             except websockets.exceptions.ConnectionClosed:
                 await asyncio.sleep(1)
-                if await self.connect():
-                    self.cb.cb_status("已重连")
-            except Exception:
-                await asyncio.sleep(0.5)
+                try:
+                    await sync.connect()
+                    cb.cb_status("已重连")
+                except Exception:
+                    cb.cb_status("重连失败，继续尝试...")
+            except Exception as e:
+                messagebox.showwarning("错误", str(e))
+        if sync.ws and sync.ws.state == protocol.State.OPEN:
+            await sync.ws.close()
 
-        if self.ws.state == protocol.State.OPEN:
-            await self.ws.close()
+    asyncio.run(run())
+
+
+def osc_thread(
+    cfg: Config, shared: SharedState, stop_event: threading.Event, cb: CallbackProtocol
+):
+    osc = None
+    last_osc = 0
+    while not stop_event.is_set():
+        with shared.lock:
+            state = shared.data.copy()
+            lyrics = shared.lyrics
+            song_key = shared.song_key
+        if state.play and state.song:
+            out = format_output(cfg, state, lyrics, song_key)
+            now = time.time()
+            if now - last_osc >= cfg.refresh_interval:
+                if osc is None:
+                    osc = udp_client.SimpleUDPClient(cfg.osc_ip, cfg.osc_port)
+                osc.send_message("/chatbox/input", [out, True, False])
+                last_osc = now
+                cb.cb_output(out)
+                cb.cb_song(f"播放：{state.song} - {state.artist}")
+        else:
+            if state.song:
+                cb.cb_song(f"暂停：{state.song}")
+        time.sleep(0.3)
 
 
 class App:
@@ -348,7 +185,8 @@ class App:
         self.root.resizable(False, False)
         self.cfg: Config = self.load_cfg()
         self.sync_event = threading.Event()
-        self.sync_task: None | threading.Thread = None
+        self.launch_event = threading.Event()
+        self.shared_state = SharedState()
         self.build_ui()
 
     def load_cfg(self) -> Config:
@@ -361,11 +199,12 @@ class App:
             data = Config(**data)
         except Exception:  # 默认配置覆盖
             data = Config()
-        self.save_cfg()
+        self.save_cfg(data)
         return data
 
-    def save_cfg(self):
-        data = self.cfg.model_dump(
+    @staticmethod
+    def save_cfg(config: Config):
+        data = config.model_dump(
             mode="json",
             exclude_none=True,
         )
@@ -482,7 +321,7 @@ class App:
         ):
             self.cfg.ncm_path = p
             self.path.set(p)
-            self.save_cfg()
+            self.save_cfg(self.cfg)
 
     def do_launch(self):
         ok, r, port = launch_netease(None, self.cfg.ncm_path)
@@ -491,8 +330,23 @@ class App:
             self.status.set(f"已启动 (端口:{port})")
             self.path.set(r)
             self.root.after(3000, lambda: self.status.set("就绪"))
+            self.netease_thread = threading.Thread(
+                target=netease_thread,
+                args=(self.cfg, self.shared_state, self.launch_event, self),
+                daemon=True,
+            )
+            self.netease_thread.start()
+            self.btn_launch.config(state="disabled")
         else:
             messagebox.showwarning("提示", f"{r}\n请手动选择路径")
+
+    def stop_launch(self):
+        if self.netease_thread and self.netease_thread.is_alive():
+            self.launch_event.set()
+            self.launch_event = threading.Event()
+            self.netease_thread.join()
+        self.btn_launch.config(state="normal")
+        self.song.set("")
 
     def preview(self):
         w = int(self.e_bw.get() or 10)
@@ -548,34 +402,30 @@ class App:
     def do_start(self):
         try:
             self.update_cfg()
-            self.save_cfg()
+            self.save_cfg(self.cfg)
         except Exception as e:
             messagebox.showerror("错误", str(e))
             return
-        self.sync_task = threading.Thread(
-            target=lambda: asyncio.run(
-                Sync(
-                    self.cfg,
-                    self,
-                ).run(self.sync_event)
-            ),
+
+        self.osc_thread = threading.Thread(
+            target=osc_thread,
+            args=(self.cfg, self.shared_state, self.sync_event, self),
             daemon=True,
         )
-        self.sync_task.start()
+        self.osc_thread.start()
 
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self.btn_launch.config(state="disabled")
+        self.status.set("同步中...")
 
     def do_stop(self):
-        if self.sync_task and self.sync_task.is_alive():
+        if self.osc_thread and self.osc_thread.is_alive():
             self.sync_event.set()
             self.sync_event = threading.Event()
+            self.osc_thread.join()
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
-        self.btn_launch.config(state="normal")
         self.status.set("已停止")
-        self.song.set("")
 
     def run(self):
         self.root.protocol(
