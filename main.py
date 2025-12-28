@@ -25,9 +25,11 @@ JS_GET_STATE = r"""(() => {
         let r = { song: '', artist: '', cur: 0, dur: 0, play: false, lyric1: '', lyric2: '' };
 
         // .main-title, .two-line .title
-        let title = document.querySelector('.two-line .title');
-        if (title) {
-            r.song = title.getAttribute("title")?.trim() || title.innerText?.trim() || "";
+        let title = document.querySelector('.main-title');
+        r.song = title?.innerText?.trim() || '';
+        if (!r.song) {
+            title = document.querySelector('.two-line .title') || document.querySelector('.two-line');
+            r.song = title?.innerText?.trim() || '';
         }
 
         // .author, .info.artist
@@ -37,7 +39,7 @@ JS_GET_STATE = r"""(() => {
 
         // .curtime-thumb, miniBarTimeTextStyle
         let timeEl = document.querySelector('.curtime-thumb');
-        if (timeEl?.innerText) { let m = timeEl.innerText.match(/(\d+):(\d+)\s*\/\s * (\d +):(\d +)/); if (m) { r.cur = +m[1] * 60 + +m[2]; r.dur = +m[3] * 60 + +m[4]; } }
+        if (timeEl?.innerText) { let m = timeEl.innerText.match(/(\d+):(\d+)\s*\/\s*(\d+):(\d+)/); if (m) { r.cur = +m[1] * 60 + +m[2]; r.dur = +m[3] * 60 + +m[4]; } }
         if (!r.dur) {
             let times = [...document.querySelectorAll('[class*="miniBarTimeTextStyle"]')].map(e => e.innerText || e.innerHTML || '').filter(t => /\d+:\d+/.test(t));
             if (times.length >= 2) { let p = t => { let m = t.match(/(\d+):(\d+)/); return m ? +m[1] * 60 + +m[2] : 0; }; r.cur = p(times[0]); r.dur = p(times[1]); }
