@@ -19,47 +19,53 @@ CONFIG_FILE = "ncm_vrchat_config.json"
 
 
 # 兼容 VIP 界面
-# 我真没辙了，怎么网易云 VIP 界面还不一样
 JS_GET_STATE = r"""(() => {
     try {
         let r = { song: '', artist: '', cur: 0, dur: 0, play: false, lyric1: '', lyric2: '' };
 
-        // .main-title, .two-line .title
-        let title = document.querySelector('.main-title');
-        r.song = title?.innerText?.trim() || '';
-        if (!r.song) {
-            title = document.querySelector('.two-line .title') || document.querySelector('.two-line');
-            r.song = title?.innerText?.trim() || '';
-        }
+        // 获取歌曲名
+        let songEl = document.querySelector('.cmd-space.title span') 
+            || document.querySelector('.main-title')
+            || document.querySelector('.two-line .title')
+            || document.querySelector('[class*="title"] span');
+        r.song = songEl?.innerText?.trim() || songEl?.textContent?.trim() || '';
 
         // .author, .info.artist
         let artist = document.querySelector('.author');
         r.artist = artist?.innerText?.trim() || '';
-        if (!r.artist) { artist = document.querySelector('.info.artist'); r.artist = (artist?.innerText || '').replace(/^歌手 [：:]/, '').trim(); }
+        if (!r.artist) { artist = document.querySelector('.info.artist'); r.artist = (artist?.innerText || '').replace(/^歌手[：:]/, '').trim(); }
 
-        // .curtime-thumb, miniBarTimeTextStyle
-        let timeEl = document.querySelector('.curtime-thumb');
-        if (timeEl?.innerText) { let m = timeEl.innerText.match(/(\d+):(\d+)\s*\/\s*(\d+):(\d+)/); if (m) { r.cur = +m[1] * 60 + +m[2]; r.dur = +m[3] * 60 + +m[4]; } }
+        // 进度遍历
+        let walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+            let text = walker.currentNode.textContent.trim();
+            let m = text.match(/^(\d+):(\d+)\s*\/\s*(\d+):(\d+)$/);
+            if (m) {
+                r.cur = +m[1] * 60 + +m[2];
+                r.dur = +m[3] * 60 + +m[4];
+                break;
+            }
+        }
+        
+        // 备用 .curtime-thumb
         if (!r.dur) {
-            let times = [...document.querySelectorAll('[class*="miniBarTimeTextStyle"]')].map(e => e.innerText || e.innerHTML || '').filter(t => /\d+:\d+/.test(t));
-            if (times.length >= 2) { let p = t => { let m = t.match(/(\d+):(\d+)/); return m ? +m[1] * 60 + +m[2] : 0; }; r.cur = p(times[0]); r.dur = p(times[1]); }
+            let timeEl = document.querySelector('.curtime-thumb');
+            if (timeEl?.innerText) { 
+                let m = timeEl.innerText.match(/(\d+):(\d+)\s*\/\s*(\d+):(\d+)/); 
+                if (m) { r.cur = +m[1] * 60 + +m[2]; r.dur = +m[3] * 60 + +m[4]; } 
+            }
         }
 
         // cmd-icon-pause, title
         r.play = !!document.querySelector('[class*="cmd-icon-pause"]') || !!document.querySelector('[title*="暂停（Ctrl"]');
 
-        // .line.current, ul.lyric li
+        // .line.current
         let curLine = document.querySelector('.line.current');
         if (curLine) {
-            r.lyric1 = curLine.innerText?.trim() || ''; let next = curLine.nextElementSibling;
-            while (next) { if (next.classList?.contains('line') && next.innerText?.trim()) { r.lyric2 = next.innerText.trim(); break; } next = next.nextElementSibling; }
-        }
-        if (!r.lyric1) {
-            let ul = document.querySelector('ul.lyric');
-            if (ul && ul.getBoundingClientRect().height > 0) {
-                let items = ul.querySelectorAll('li'); let idx = -1;
-                items.forEach((li, i) => { let s = window.getComputedStyle(li); if (s.color === 'rgb(255, 255, 255)' && s.fontSize === '22px') idx = i; });
-                if (idx >= 0) { r.lyric1 = items[idx].innerText?.trim() || ''; for (let j = idx + 1; j < items.length; j++) { let t = items[j].innerText?.trim(); if (t) { r.lyric2 = t; break; } } }
+            r.lyric1 = curLine.innerText?.trim() || '';
+            let next = curLine.nextElementSibling;
+            if (next && next.classList?.contains('line')) {
+                r.lyric2 = next.innerText?.trim() || '';
             }
         }
 
@@ -89,25 +95,52 @@ def netease_thread(
             self.ws = await websockets.connect(
                 pages[0]["webSocketDebuggerUrl"], ping_interval=30, ping_timeout=15
             )
-            print("Connected to Netease WebSocket", pages[0]["webSocketDebuggerUrl"])
 
-        async def eval_js(self, code):
+        async def eval_js(self, code, timeout=1):
             if not self.ws:
                 return None
+            
+            # 激活页面
             self.msg_id += 1
-            await self.ws.send(
-                json.dumps(
-                    {
-                        "id": self.msg_id,
-                        "method": "Runtime.evaluate",
-                        "params": {"expression": code, "returnByValue": True},
-                    }
-                )
-            )
-            async for msg in self.ws:
-                d = json.loads(msg)
-                if d.get("id") == self.msg_id:
-                    return d.get("result", {}).get("result", {}).get("value")
+            bring_id = self.msg_id
+            await self.ws.send(json.dumps({"id": bring_id, "method": "Page.bringToFront"}))
+            
+            # 等待 bringToFront 响应
+            try:
+                while True:
+                    msg = await asyncio.wait_for(self.ws.recv(), timeout=0.5)
+                    d = json.loads(msg)
+                    if d.get("id") == bring_id:
+                        break
+            except asyncio.TimeoutError:
+                pass
+            
+            # 执行主代码
+            self.msg_id += 1
+            msg_id = self.msg_id
+            await self.ws.send(json.dumps({
+                "id": msg_id, "method": "Runtime.evaluate",
+                "params": {"expression": code, "returnByValue": True},
+            }))
+            
+            result = None
+            try:
+                end_time = asyncio.get_event_loop().time() + timeout
+                while True:
+                    remaining = end_time - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break
+                    msg = await asyncio.wait_for(self.ws.recv(), timeout=remaining)
+                    d = json.loads(msg)
+                    if d.get("id") == msg_id:
+                        result = d.get("result", {}).get("result", {}).get("value")
+                        break
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
+            
+            return result
 
     async def run():
         cb.cb_status("连接中...")
@@ -125,18 +158,73 @@ def netease_thread(
             cb.cb_status("连接失败，已达最大重试次数")
             return
         cb.cb_status("已连接")
+        
+        timeout_count = 0
+        
         while not stop_event.is_set():
             try:
                 s = await sync.eval_js(JS_GET_STATE)
-                if s and s.get("song"):
+                
+                if s is None:
+                    timeout_count += 1
+                    if timeout_count >= 3:
+                        cb.cb_status("响应超时，重连中...")
+                        try:
+                            await sync.connect()
+                            cb.cb_status("已重连")
+                            timeout_count = 0
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.5)
+                    continue
+                
+                timeout_count = 0
+                
+                if s.get("song"):
+                    need_fetch = False
+                    song_to_fetch = ""
+                    artist_to_fetch = ""
+                    key = ""
+                    
                     with shared.lock:
+                        # 切歌过渡期
+                        if s.get("cur", 0) == 0 and s.get("dur", 0) == 0:
+                            if shared.data.dur > 0:
+                                if s.get("song") != shared.data.song:
+                                    s["cur"] = 0
+                                    s["dur"] = shared.data.dur
+                                else:
+                                    s["cur"] = shared.data.cur
+                                    s["dur"] = shared.data.dur
+                        
                         shared.data.update(s)
-                        key = f"{shared.data.song}-{shared.data.artist}"
-                        if key != shared.song_key:
-                            shared.song_key = key
-                            shared.lyrics = fetch_lyrics(
-                                shared.data.song, shared.data.artist
-                            )
+                        shared.last_update = time.time()
+                        
+                        if shared.data.song:
+                            key = f"{shared.data.song}-{shared.data.artist}"
+                            if key != shared.song_key:
+                                shared.song_key = key
+                                shared.lyrics = []
+                                need_fetch = True
+                                song_to_fetch = shared.data.song
+                                artist_to_fetch = shared.data.artist
+                    
+                    # 启动歌词获取线程
+                    if need_fetch:
+                        def fetch_task(k, song, artist):
+                            try:
+                                new_lyrics = fetch_lyrics(song, artist)
+                                with shared.lock:
+                                    if shared.song_key == k:
+                                        shared.lyrics = new_lyrics
+                            except Exception:
+                                pass
+                        threading.Thread(
+                            target=fetch_task,
+                            args=(key, song_to_fetch, artist_to_fetch),
+                            daemon=True
+                        ).start()
+                
                 await asyncio.sleep(0.3)
             except websockets.exceptions.ConnectionClosed:
                 await asyncio.sleep(1)
@@ -145,8 +233,9 @@ def netease_thread(
                     cb.cb_status("已重连")
                 except Exception:
                     cb.cb_status("重连失败，继续尝试...")
-            except Exception as e:
-                messagebox.showwarning("错误", str(e))
+            except Exception:
+                pass
+        
         if sync.ws and sync.ws.state == protocol.State.OPEN:
             await sync.ws.close()
 
@@ -161,8 +250,15 @@ def osc_thread(
     while not stop_event.is_set():
         with shared.lock:
             state = shared.data.copy()
-            lyrics = shared.lyrics
+            lyrics = list(shared.lyrics)
             song_key = shared.song_key
+            last_update = shared.last_update
+        
+        # 推算进度
+        if state.play and state.song and last_update > 0:
+            elapsed = time.time() - last_update
+            state.cur = min(int(state.cur + elapsed), state.dur) if state.dur else state.cur
+        
         if state.play and state.song:
             out = format_output(cfg, state, lyrics, song_key)
             now = time.time()
@@ -182,13 +278,15 @@ def osc_thread(
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("网易云 VRC 助手")
+        self.root.title("网易云 VRC 助手 - 1.0.2")
         self.root.geometry("460x480")
         self.root.resizable(False, False)
         self.cfg: Config = self.load_cfg()
         self.sync_event = threading.Event()
         self.launch_event = threading.Event()
         self.shared_state = SharedState()
+        self.netease_thread = None
+        self.osc_thread = None
         self.build_ui()
 
     def load_cfg(self) -> Config:
@@ -345,36 +443,39 @@ class App:
     def stop_launch(self):
         if self.netease_thread and self.netease_thread.is_alive():
             self.launch_event.set()
+            self.netease_thread.join(timeout=2)
             self.launch_event = threading.Event()
-            self.netease_thread.join()
         self.btn_launch.config(state="normal")
         self.song.set("")
 
     def preview(self):
-        w = int(self.e_bw.get() or 10)
-        thumb = self.e_bt.get() or ""
-        pos = w // 2
-        bar = (
-            (self.e_bf.get() or "▓") * pos
-            + thumb
-            + (self.e_be.get() or "░") * (w - pos)
-        )
-        txt = (
-            self.t_tpl.get("1.0", "end")
-            .strip()
-            .format(
-                song="歌曲名称",
-                artist="歌手",
-                bar=bar,
-                time="1:14/5:14",
-                lyric1="当前歌词",
-                lyric2="下句歌词",
+        try:
+            w = int(self.e_bw.get() or 10)
+            thumb = self.e_bt.get() or ""
+            pos = w // 2
+            bar = (
+                (self.e_bf.get() or "▓") * pos
+                + thumb
+                + (self.e_be.get() or "░") * (w - pos)
             )
-        )
-        self.t_preview.config(state="normal")
-        self.t_preview.delete("1.0", "end")
-        self.t_preview.insert("1.0", txt)
-        self.t_preview.config(state="disabled")
+            txt = (
+                self.t_tpl.get("1.0", "end")
+                .strip()
+                .format(
+                    song="歌曲名称",
+                    artist="歌手",
+                    bar=bar,
+                    time="1:14/5:14",
+                    lyric1="当前歌词",
+                    lyric2="下句歌词",
+                )
+            )
+            self.t_preview.config(state="normal")
+            self.t_preview.delete("1.0", "end")
+            self.t_preview.insert("1.0", txt)
+            self.t_preview.config(state="disabled")
+        except Exception:
+            pass
 
     def update_cfg(self):
         self.cfg.osc_ip = self.e_ip.get()
@@ -423,16 +524,18 @@ class App:
     def do_stop(self):
         if self.osc_thread and self.osc_thread.is_alive():
             self.sync_event.set()
+            self.osc_thread.join(timeout=2)
             self.sync_event = threading.Event()
-            self.osc_thread.join()
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
         self.status.set("已停止")
 
     def run(self):
-        self.root.protocol(
-            "WM_DELETE_WINDOW", lambda: (self.do_stop(), self.root.destroy())
-        )
+        def on_close():
+            self.do_stop()
+            self.stop_launch()
+            self.root.destroy()
+        self.root.protocol("WM_DELETE_WINDOW", on_close)
         self.root.mainloop()
 
 
