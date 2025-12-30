@@ -33,10 +33,13 @@ def format_output(cfg: Config, state, lyrics, song_key):
         bar = cfg.bar_filled * pos + thumb + cfg.bar_empty * (w - pos)
     else:
         bar = cfg.bar_filled * pos + cfg.bar_empty * (w - pos)
+    
+    # 优先使用软件歌词
     l1, l2 = state.lyric1, state.lyric2
-    if not l1 and song_key == f"{state.song}-{state.artist}":
+    if not l1 and lyrics and song_key == f"{state.song}-{state.artist}":
         l1, l2 = get_lyric(lyrics, c)
     l1, l2 = l1 or "纯音乐，请欣赏", l2 or ""
+    
     try:
         return cfg.template.format(
             song=state.song,
@@ -126,7 +129,13 @@ def launch_netease(port=None, path=None):
         return False, "未找到网易云", None
     if port is None:
         port = find_free_port()
-    proc = subprocess.Popen([exe, f"--remote-debugging-port={port}"])
+    proc = subprocess.Popen([
+        exe,
+        f"--remote-debugging-port={port}",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+    ])
 
     def _kill_proc():
         with contextlib.suppress(Exception):

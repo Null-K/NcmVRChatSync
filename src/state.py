@@ -36,3 +36,4 @@ class SharedState:
         self.data = SongState()
         self.song_key = ""
         self.lyrics = []
+        self.last_update = 0  # 上次获取 JS 数据的时间戳
